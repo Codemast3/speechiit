@@ -15,7 +15,6 @@ const app = express()
 const upload = multer({ dest: 'uploads/' })
 
 const dburl = process.env.DB_URL || 'mongodb://localhost:27017/speechdb'
-// const dburl = 'mongodb://localhost:27017/speechdb'
 
 // MongoDB Connection
 async function connectToMongoDB() {
@@ -37,6 +36,11 @@ const taskSchema = new mongoose.Schema({
   transcription: String,
   user_id: String,
   createdAt: { type: Date, default: Date.now },
+  sentiment: Array,
+  chapters: Array,
+  entities: Array,
+  topics: Object,
+  safety_labels: Object,
 })
 const Task = mongoose.model('Task', taskSchema)
 
@@ -53,11 +57,11 @@ app.post('/upload', upload.single('audio'), (req, res) => {
     .json({ message: 'File uploaded successfully', file: req.file })
 })
 
-// Transcription Route
+// Transcription + Audio Intelligence Route
 app.post('/transcription', upload.single('audio'), async (req, res) => {
   if (!req.file)
     return res.status(400).json({ error: 'No audio file uploaded' })
-  const userId = req.body.userId // Ensure userId is being passed
+  const userId = req.body.userId
   const filePath = req.file.path
 
   try {
@@ -76,12 +80,23 @@ app.post('/transcription', upload.single('audio'), async (req, res) => {
 
     const transcriptResponse = await axios.post(
       'https://api.assemblyai.com/v2/transcript',
-      { audio_url: assemblyUploadUrl },
-      { headers: { authorization: process.env.ASSEMBLYAI_API_KEY } }
+      {
+        audio_url: assemblyUploadUrl,
+        auto_chapters: true,
+        sentiment_analysis: true,
+        entity_detection: true,
+        content_safety: true,
+        iab_categories: true,
+      },
+      {
+        headers: {
+          authorization: process.env.ASSEMBLYAI_API_KEY,
+        },
+      }
     )
     const transcriptId = transcriptResponse.data.id
 
-    // Polling for transcription completion
+    // Polling
     let transcriptionResult
     let retries = 20
     while (retries--) {
@@ -96,19 +111,31 @@ app.post('/transcription', upload.single('audio'), async (req, res) => {
       await new Promise((resolve) => setTimeout(resolve, 5000))
     }
 
-    fs.unlinkSync(filePath) // Delete uploaded file
+    fs.unlinkSync(filePath)
 
-    // Save transcription in MongoDB
+    // Save all Audio Intelligence results
     const newTask = new Task({
       audio_url: `/uploads/${req.file.filename}`,
       transcription: transcriptionResult.text,
       user_id: userId,
+      sentiment: transcriptionResult.sentiment_analysis_results || [],
+      chapters: transcriptionResult.auto_chapters || [],
+      entities: transcriptionResult.entities || [],
+      topics: transcriptionResult.iab_categories_result || {},
+      safety_labels: transcriptionResult.content_safety_labels || {},
     })
     await newTask.save()
 
     res.status(200).json({
-      message: 'Transcription saved successfully',
+      message: 'Transcription and Intelligence saved successfully',
       transcription: transcriptionResult.text,
+      intelligence: {
+        sentiment: transcriptionResult.sentiment_analysis_results,
+        chapters: transcriptionResult.auto_chapters,
+        entities: transcriptionResult.entities,
+        topics: transcriptionResult.iab_categories_result,
+        safety_labels: transcriptionResult.content_safety_labels,
+      },
     })
   } catch (error) {
     console.error('❌ Transcription Error:', error)
